@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: autotask-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: autotask_data
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - autotask-network
+
+  autotask-data-sink:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autotask-data-sink
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database configuration
+      # These will be used by both our app and the PostgreSQL driver
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: autotask_data
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGSSLMODE: disable
+      
+      # Autotask API credentials
+      # These should be set in your environment before running docker-compose
+      # Direct environment variables for the Autotask client
+      AUTOTASK_USERNAME: ${AUTOTASK_USERNAME:-demo}
+      AUTOTASK_SECRET: ${AUTOTASK_SECRET:-demo}
+      AUTOTASK_INTEGRATION_CODE: ${AUTOTASK_INTEGRATION_CODE:-demo}
+      
+      # Also set the prefixed versions for the config package
+      AUTOTASK_SINK_AUTOTASK_USERNAME: ${AUTOTASK_USERNAME:-demo}
+      AUTOTASK_SINK_AUTOTASK_SECRET: ${AUTOTASK_SECRET:-demo}
+      AUTOTASK_SINK_AUTOTASK_INTEGRATION_CODE: ${AUTOTASK_INTEGRATION_CODE:-demo}
+      
+      # Sync frequencies (optional, defaults will be used if not set)
+      AUTOTASK_SINK_SYNC_TICKETS: 15
+      AUTOTASK_SINK_SYNC_TIME_ENTRIES: 15
+      AUTOTASK_SINK_SYNC_COMPANIES: 1440
+      AUTOTASK_SINK_SYNC_CONTACTS: 1440
+      
+      # Logging configuration (optional)
+      AUTOTASK_SINK_LOG_LEVEL: debug
+      AUTOTASK_SINK_LOG_FORMAT: json
+    restart: unless-stopped
+    networks:
+      - autotask-network
+
+  # Test container for debugging
+  postgres-test:
+    image: postgres:14-alpine
+    container_name: postgres-test
+    command: /bin/sh -c "while true; do sleep 30; done"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - autotask-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: autotask-grafana
+    depends_on:
+      - postgres
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    networks:
+      - autotask-network
+
+networks:
+  autotask-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  grafana_data:

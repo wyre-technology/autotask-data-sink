@@ -1,0 +1,25 @@
+autotask:
+  username: "your-username"
+  secret: "your-api-key"
+  integration_code: "your-integration-code"
+
+database:
+  host: "localhost"
+  port: 5432
+  name: "autotask_data"
+  user: "postgres"
+  password: "your-password"
+  ssl_mode: "disable"
+
+sync:
+  # Sync frequencies in minutes
+  tickets: 15
+  time_entries: 15
+  companies: 1440  # Daily
+  contacts: 1440   # Daily
+  resources: 1440  # Daily
+  contracts: 1440  # Daily
+
+log:
+  level: "info"  # debug, info, warn, error
+  format: "json" # json, console 
