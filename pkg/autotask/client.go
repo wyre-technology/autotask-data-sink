@@ -58,9 +58,10 @@ func (c *Client) GetCompanies(ctx context.Context) ([]map[string]interface{}, er
 		PageDetails map[string]interface{}   `json:"pageDetails"`
 	}
 
-	// Query active companies
-	filter := "Active=true"
-	err := c.client.Companies().Query(ctx, filter, &response)
+	// Query companies without the Active filter that's causing issues
+	// The error suggests "Active" field might not exist or have a different name
+	// Try without any filter first to get all companies
+	err := c.client.Companies().Query(ctx, "", &response)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query companies: %w", err)
 	}
@@ -95,9 +96,9 @@ func (c *Client) GetContacts(ctx context.Context) ([]map[string]interface{}, err
 		PageDetails map[string]interface{}   `json:"pageDetails"`
 	}
 
-	// Query active contacts
-	filter := "Active=true"
-	err := c.client.Contacts().Query(ctx, filter, &response)
+	// Query contacts without the Active filter that might cause issues
+	// Similar to the companies query, remove the filter for now
+	err := c.client.Contacts().Query(ctx, "", &response)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query contacts: %w", err)
 	}
