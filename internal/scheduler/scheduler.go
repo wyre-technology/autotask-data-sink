@@ -3,8 +3,9 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"sync"
 
-	"github.com/asachs01/autotask-data-sink/internal/sync"
+	syncservice "github.com/asachs01/autotask-data-sink/internal/sync"
 	"github.com/asachs01/autotask-data-sink/pkg/config"
 	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog/log"
@@ -12,7 +13,7 @@ import (
 
 // Scheduler handles the scheduling of sync tasks
 type Scheduler struct {
-	syncService *sync.Service
+	syncService *syncservice.Service
 	cron        *cron.Cron
 	config      *config.SyncConfig
 	ctx         context.Context
@@ -20,7 +21,7 @@ type Scheduler struct {
 }
 
 // New creates a new scheduler
-func New(syncService *sync.Service, config *config.SyncConfig) *Scheduler {
+func New(syncService *syncservice.Service, config *config.SyncConfig) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Scheduler{
@@ -100,22 +101,59 @@ func (s *Scheduler) Stop() {
 func (s *Scheduler) RunInitialSync() error {
 	log.Info().Msg("Running initial sync")
 
-	// Sync companies
-	if err := s.syncService.SyncCompanies(s.ctx); err != nil {
-		return fmt.Errorf("failed to sync companies: %w", err)
+	// Use a WaitGroup to wait for all syncs to complete
+	var wg sync.WaitGroup
+
+	// Channel to collect errors from goroutines
+	errChan := make(chan error, 5) // Buffer for up to 5 errors
+
+	// Run company sync in a goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.syncService.SyncCompanies(s.ctx); err != nil {
+			log.Error().Err(err).Msg("Failed to sync companies")
+			errChan <- fmt.Errorf("failed to sync companies: %w", err)
+		}
+	}()
+
+	// Run contact sync in a goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.syncService.SyncContacts(s.ctx); err != nil {
+			log.Error().Err(err).Msg("Failed to sync contacts")
+			errChan <- fmt.Errorf("failed to sync contacts: %w", err)
+		}
+	}()
+
+	// Run ticket sync in a goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.syncService.SyncTickets(s.ctx); err != nil {
+			log.Error().Err(err).Msg("Failed to sync tickets")
+			errChan <- fmt.Errorf("failed to sync tickets: %w", err)
+		}
+	}()
+
+	// Wait for all syncs to complete
+	wg.Wait()
+
+	// Close the error channel
+	close(errChan)
+
+	// Check if there were any errors
+	var errs []error
+	for err := range errChan {
+		errs = append(errs, err)
 	}
 
-	// Sync contacts
-	if err := s.syncService.SyncContacts(s.ctx); err != nil {
-		return fmt.Errorf("failed to sync contacts: %w", err)
+	if len(errs) > 0 {
+		// Return the first error
+		return errs[0]
 	}
 
-	// Sync tickets
-	if err := s.syncService.SyncTickets(s.ctx); err != nil {
-		return fmt.Errorf("failed to sync tickets: %w", err)
-	}
-
-	log.Info().Msg("Initial sync completed")
 	return nil
 }
 
@@ -124,23 +162,61 @@ func (s *Scheduler) WaitForever() {
 	<-s.ctx.Done()
 }
 
-// RunOnce runs a single sync for all entities
+// RunOnce runs a one-time sync for all entities
 func (s *Scheduler) RunOnce() error {
 	log.Info().Msg("Running one-time sync")
 
-	// Sync companies
-	if err := s.syncService.SyncCompanies(s.ctx); err != nil {
-		return fmt.Errorf("failed to sync companies: %w", err)
+	// Use a WaitGroup to wait for all syncs to complete
+	var wg sync.WaitGroup
+
+	// Channel to collect errors from goroutines
+	errChan := make(chan error, 5) // Buffer for up to 5 errors
+
+	// Run company sync in a goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.syncService.SyncCompanies(s.ctx); err != nil {
+			log.Error().Err(err).Msg("Failed to sync companies")
+			errChan <- fmt.Errorf("failed to sync companies: %w", err)
+		}
+	}()
+
+	// Run contact sync in a goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.syncService.SyncContacts(s.ctx); err != nil {
+			log.Error().Err(err).Msg("Failed to sync contacts")
+			errChan <- fmt.Errorf("failed to sync contacts: %w", err)
+		}
+	}()
+
+	// Run ticket sync in a goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.syncService.SyncTickets(s.ctx); err != nil {
+			log.Error().Err(err).Msg("Failed to sync tickets")
+			errChan <- fmt.Errorf("failed to sync tickets: %w", err)
+		}
+	}()
+
+	// Wait for all syncs to complete
+	wg.Wait()
+
+	// Close the error channel
+	close(errChan)
+
+	// Check if there were any errors
+	var errs []error
+	for err := range errChan {
+		errs = append(errs, err)
 	}
 
-	// Sync contacts
-	if err := s.syncService.SyncContacts(s.ctx); err != nil {
-		return fmt.Errorf("failed to sync contacts: %w", err)
-	}
-
-	// Sync tickets
-	if err := s.syncService.SyncTickets(s.ctx); err != nil {
-		return fmt.Errorf("failed to sync tickets: %w", err)
+	if len(errs) > 0 {
+		// Return the first error
+		return errs[0]
 	}
 
 	log.Info().Msg("One-time sync completed")

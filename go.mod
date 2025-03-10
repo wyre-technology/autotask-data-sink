@@ -5,7 +5,7 @@ go 1.22.0
 toolchain go1.24.0
 
 require (
-	github.com/asachs01/autotask-go v1.0.0
+	github.com/asachs01/autotask-go v1.1.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/lib/pq v1.10.9
 	github.com/robfig/cron/v3 v3.0.1

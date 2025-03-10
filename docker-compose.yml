@@ -61,17 +61,6 @@ services:
     networks:
       - autotask-network
 
-  # Test container for debugging
-  postgres-test:
-    image: postgres:14-alpine
-    container_name: postgres-test
-    command: /bin/sh -c "while true; do sleep 30; done"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - autotask-network
-
   grafana:
     image: grafana/grafana:latest
     container_name: autotask-grafana
