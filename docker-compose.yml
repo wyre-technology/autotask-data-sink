@@ -26,9 +26,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    env_file: .env
     environment:
       # Database configuration
-      # These will be used by both our app and the PostgreSQL driver
       PGHOST: postgres
       PGPORT: 5432
       PGDATABASE: autotask_data
@@ -36,27 +36,15 @@ services:
       PGPASSWORD: postgres
       PGSSLMODE: disable
       
-      # Autotask API credentials
-      # These should be set in your environment before running docker-compose
-      # Direct environment variables for the Autotask client
-      AUTOTASK_USERNAME: ${AUTOTASK_USERNAME:-demo}
-      AUTOTASK_SECRET: ${AUTOTASK_SECRET:-demo}
-      AUTOTASK_INTEGRATION_CODE: ${AUTOTASK_INTEGRATION_CODE:-demo}
+      # Sync frequencies (optional)
+      SYNC_TICKETS: 15
+      SYNC_TIME_ENTRIES: 15
+      SYNC_COMPANIES: 1440
+      SYNC_CONTACTS: 1440
       
-      # Also set the prefixed versions for the config package
-      AUTOTASK_SINK_AUTOTASK_USERNAME: ${AUTOTASK_USERNAME:-demo}
-      AUTOTASK_SINK_AUTOTASK_SECRET: ${AUTOTASK_SECRET:-demo}
-      AUTOTASK_SINK_AUTOTASK_INTEGRATION_CODE: ${AUTOTASK_INTEGRATION_CODE:-demo}
-      
-      # Sync frequencies (optional, defaults will be used if not set)
-      AUTOTASK_SINK_SYNC_TICKETS: 15
-      AUTOTASK_SINK_SYNC_TIME_ENTRIES: 15
-      AUTOTASK_SINK_SYNC_COMPANIES: 1440
-      AUTOTASK_SINK_SYNC_CONTACTS: 1440
-      
-      # Logging configuration (optional)
-      AUTOTASK_SINK_LOG_LEVEL: debug
-      AUTOTASK_SINK_LOG_FORMAT: json
+      # Logging configuration
+      LOG_LEVEL: debug
+      LOG_FORMAT: json
     restart: unless-stopped
     networks:
       - autotask-network

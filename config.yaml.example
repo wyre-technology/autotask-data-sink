@@ -10,6 +10,11 @@ database:
   user: "postgres"
   password: "your-password"
   ssl_mode: "disable"
+  pool:
+    max_open_conns: 25
+    max_idle_conns: 5
+    conn_max_lifetime: "1h"
+    conn_max_idle_time: "5m"
 
 sync:
   # Sync frequencies in minutes
@@ -19,6 +24,7 @@ sync:
   contacts: 1440   # Daily
   resources: 1440  # Daily
   contracts: 1440  # Daily
+  batch_size: 100  # Number of records per batch
 
 log:
   level: "info"  # debug, info, warn, error

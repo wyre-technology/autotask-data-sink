@@ -2,10 +2,12 @@ package sync
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
 	"github.com/asachs01/autotask-data-sink/pkg/autotask"
+	"github.com/asachs01/autotask-data-sink/pkg/config"
 	"github.com/asachs01/autotask-data-sink/pkg/database"
 	"github.com/asachs01/autotask-data-sink/pkg/models"
 	"github.com/rs/zerolog/log"
@@ -15,241 +17,255 @@ import (
 type Service struct {
 	db     *database.DB
 	client *autotask.Client
+	config *config.Config
 }
 
 // New creates a new sync service
-func New(db *database.DB, client *autotask.Client) *Service {
+func New(db *database.DB, client *autotask.Client, config *config.Config) *Service {
 	return &Service{
 		db:     db,
 		client: client,
+		config: config,
 	}
+}
+
+// RetryConfig holds retry configuration
+type RetryConfig struct {
+	MaxRetries  int
+	InitialWait time.Duration
+	MaxWait     time.Duration
+}
+
+// DefaultRetryConfig returns the default retry configuration
+func DefaultRetryConfig() RetryConfig {
+	return RetryConfig{
+		MaxRetries:  3,
+		InitialWait: time.Second,
+		MaxWait:     time.Minute * 5,
+	}
+}
+
+// withRetry executes the given function with retries
+func (s *Service) withRetry(ctx context.Context, operation string, fn func() error) error {
+	config := DefaultRetryConfig()
+	var lastErr error
+
+	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
+		if err := fn(); err != nil {
+			lastErr = err
+
+			// Check if we should retry
+			if !autotask.RetryableError(err) || attempt == config.MaxRetries {
+				return fmt.Errorf("%s failed after %d attempts: %w", operation, attempt+1, err)
+			}
+
+			// Calculate wait time using exponential backoff
+			wait := config.InitialWait * time.Duration(1<<uint(attempt))
+			if wait > config.MaxWait {
+				wait = config.MaxWait
+			}
+
+			log.Warn().
+				Err(err).
+				Int("attempt", attempt+1).
+				Int("max_retries", config.MaxRetries).
+				Dur("wait", wait).
+				Str("operation", operation).
+				Msg("Operation failed, retrying")
+
+			// Wait before retrying
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+				continue
+			}
+		}
+
+		return nil
+	}
+
+	return lastErr
+}
+
+// processBatch processes a batch of records within a transaction
+func (s *Service) processBatch(ctx context.Context, fn func(context.Context, *database.Tx) error) error {
+	return s.db.WithTransaction(ctx, func(tx *database.Tx) error {
+		return fn(ctx, tx)
+	})
 }
 
 // SyncCompanies synchronizes companies from Autotask to the database
 func (s *Service) SyncCompanies(ctx context.Context) error {
 	log.Info().Msg("Starting company sync")
 
-	// Get companies from Autotask
-	companies, err := s.client.GetCompanies(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get companies: %w", err)
-	}
-
-	// Process all companies in memory first
-	newCompanies := make([]models.Company, 0, len(companies))
-	updateCompanies := make([]models.Company, 0, len(companies))
-
-	// Begin transaction
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// First, get all existing company IDs to determine which ones to insert vs update
-	existingCompanyIDs := make(map[int64]bool)
-	rows, err := tx.QueryxContext(ctx, "SELECT id FROM autotask.companies")
-	if err != nil {
-		return fmt.Errorf("failed to query existing companies: %w", err)
-	}
-	defer rows.Close()
-
-	var companyID int64
-	for rows.Next() {
-		if err := rows.Scan(&companyID); err != nil {
-			return fmt.Errorf("failed to scan company ID: %w", err)
-		}
-		existingCompanyIDs[companyID] = true
-	}
-
-	// Process each company in memory
-	for _, companyData := range companies {
-		// Extract company ID
-		idVal, ok := companyData["id"]
-		if !ok {
-			log.Warn().Interface("company", companyData).Msg("Company data missing ID field, skipping")
-			continue
-		}
-
-		// Convert ID to int64
-		var id int64
-		switch v := idVal.(type) {
-		case float64:
-			id = int64(v)
-		case int64:
-			id = v
-		case int:
-			id = int64(v)
-		default:
-			log.Warn().
-				Interface("company", companyData).
-				Str("idType", fmt.Sprintf("%T", idVal)).
-				Msg("Unexpected ID type, skipping")
-			continue
-		}
-
-		// Extract company fields
-		company := models.Company{
-			ID:     id,
-			Name:   getStringValue(companyData, "companyName"),
-			SyncAt: time.Now(),
-		}
-
-		// Set optional fields
-		if val, ok := companyData["address1"]; ok {
-			company.AddressLine1.String = fmt.Sprintf("%v", val)
-			company.AddressLine1.Valid = true
-		}
-		if val, ok := companyData["address2"]; ok {
-			company.AddressLine2.String = fmt.Sprintf("%v", val)
-			company.AddressLine2.Valid = true
-		}
-		if val, ok := companyData["city"]; ok {
-			company.City.String = fmt.Sprintf("%v", val)
-			company.City.Valid = true
-		}
-		if val, ok := companyData["state"]; ok {
-			company.State.String = fmt.Sprintf("%v", val)
-			company.State.Valid = true
-		}
-		if val, ok := companyData["postalCode"]; ok {
-			company.PostalCode.String = fmt.Sprintf("%v", val)
-			company.PostalCode.Valid = true
-		}
-		if val, ok := companyData["country"]; ok {
-			company.Country.String = fmt.Sprintf("%v", val)
-			company.Country.Valid = true
-		}
-		if val, ok := companyData["phone"]; ok {
-			company.Phone.String = fmt.Sprintf("%v", val)
-			company.Phone.Valid = true
-		}
-		if val, ok := companyData["active"]; ok {
-			if boolVal, ok := val.(bool); ok {
-				company.Active.Bool = boolVal
-				company.Active.Valid = true
-			}
-		}
-		if val, ok := companyData["createDate"]; ok {
-			if timeVal, err := parseTime(val); err == nil {
-				company.CreatedAt.Time = timeVal
-				company.CreatedAt.Valid = true
-			}
-		}
-		if val, ok := companyData["lastActivityDate"]; ok {
-			if timeVal, err := parseTime(val); err == nil {
-				company.UpdatedAt.Time = timeVal
-				company.UpdatedAt.Valid = true
-			}
-		}
-
-		// Add to appropriate slice based on whether it exists
-		if existingCompanyIDs[id] {
-			updateCompanies = append(updateCompanies, company)
-		} else {
-			newCompanies = append(newCompanies, company)
-		}
-	}
-
-	// Batch insert new companies
-	if len(newCompanies) > 0 {
-		// Use a prepared statement for better performance
-		stmt, err := tx.PreparexContext(ctx, `
-			INSERT INTO autotask.companies (
-				id, name, address_line1, address_line2, city, state, postal_code,
-				country, phone, active, created_at, updated_at, sync_at
-			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7,
-				$8, $9, $10, $11, $12, $13
-			)
-		`)
+	return s.withRetry(ctx, "company sync", func() error {
+		// Get companies from Autotask
+		companies, err := s.client.GetCompanies(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to prepare insert statement: %w", err)
-		}
-		defer stmt.Close()
-
-		for _, company := range newCompanies {
-			_, err = stmt.ExecContext(ctx,
-				company.ID,
-				company.Name,
-				company.AddressLine1,
-				company.AddressLine2,
-				company.City,
-				company.State,
-				company.PostalCode,
-				company.Country,
-				company.Phone,
-				company.Active,
-				company.CreatedAt,
-				company.UpdatedAt,
-				company.SyncAt,
-			)
-			if err != nil {
-				return fmt.Errorf("failed to insert company %d: %w", company.ID, err)
-			}
+			return fmt.Errorf("failed to get companies: %w", err)
 		}
 
-		log.Info().Int("count", len(newCompanies)).Msg("Inserted new companies")
-	}
+		// Process all companies in memory first
+		newCompanies := make([]models.Company, 0, len(companies))
+		updateCompanies := make([]models.Company, 0, len(companies))
 
-	// Batch update existing companies
-	if len(updateCompanies) > 0 {
-		// Use a prepared statement for better performance
-		stmt, err := tx.PreparexContext(ctx, `
-			UPDATE autotask.companies SET
-				name = $2,
-				address_line1 = $3,
-				address_line2 = $4,
-				city = $5,
-				state = $6,
-				postal_code = $7,
-				country = $8,
-				phone = $9,
-				active = $10,
-				created_at = $11,
-				updated_at = $12,
-				sync_at = $13
-			WHERE id = $1
-		`)
+		// Get all existing company IDs
+		existingCompanyIDs := make(map[int64]bool)
+		rows, err := s.db.QueryxContext(ctx, "SELECT id FROM autotask.companies")
 		if err != nil {
-			return fmt.Errorf("failed to prepare update statement: %w", err)
+			return fmt.Errorf("failed to query existing companies: %w", err)
 		}
-		defer stmt.Close()
+		defer rows.Close()
 
-		for _, company := range updateCompanies {
-			_, err = stmt.ExecContext(ctx,
-				company.ID,
-				company.Name,
-				company.AddressLine1,
-				company.AddressLine2,
-				company.City,
-				company.State,
-				company.PostalCode,
-				company.Country,
-				company.Phone,
-				company.Active,
-				company.CreatedAt,
-				company.UpdatedAt,
-				company.SyncAt,
-			)
-			if err != nil {
-				return fmt.Errorf("failed to update company %d: %w", company.ID, err)
+		var companyID int64
+		for rows.Next() {
+			if err := rows.Scan(&companyID); err != nil {
+				return fmt.Errorf("failed to scan company ID: %w", err)
+			}
+			existingCompanyIDs[companyID] = true
+		}
+
+		// Process each company in memory
+		for _, companyData := range companies {
+			// Extract company fields
+			model := models.Company{
+				ID:     getInt64Value(companyData, "id"),
+				Name:   getStringValue(companyData, "companyName"),
+				SyncAt: time.Now(),
+			}
+
+			// Set optional fields
+			model.AddressLine1 = sql.NullString{
+				String: getStringValue(companyData, "address1"),
+				Valid:  hasValue(companyData, "address1"),
+			}
+			model.AddressLine2 = sql.NullString{
+				String: getStringValue(companyData, "address2"),
+				Valid:  hasValue(companyData, "address2"),
+			}
+			model.City = sql.NullString{
+				String: getStringValue(companyData, "city"),
+				Valid:  hasValue(companyData, "city"),
+			}
+			model.State = sql.NullString{
+				String: getStringValue(companyData, "state"),
+				Valid:  hasValue(companyData, "state"),
+			}
+			model.PostalCode = sql.NullString{
+				String: getStringValue(companyData, "postalCode"),
+				Valid:  hasValue(companyData, "postalCode"),
+			}
+			model.Country = sql.NullString{
+				String: getStringValue(companyData, "country"),
+				Valid:  hasValue(companyData, "country"),
+			}
+			model.Phone = sql.NullString{
+				String: getStringValue(companyData, "phone"),
+				Valid:  hasValue(companyData, "phone"),
+			}
+			model.Active = sql.NullBool{
+				Bool:  getBoolValue(companyData, "active"),
+				Valid: hasValue(companyData, "active"),
+			}
+
+			if existingCompanyIDs[model.ID] {
+				updateCompanies = append(updateCompanies, model)
+			} else {
+				newCompanies = append(newCompanies, model)
 			}
 		}
 
-		log.Info().Int("count", len(updateCompanies)).Msg("Updated existing companies")
-	}
+		// Process new companies in batches
+		if len(newCompanies) > 0 {
+			for i := 0; i < len(newCompanies); i += s.config.Sync.BatchSize {
+				end := i + s.config.Sync.BatchSize
+				if end > len(newCompanies) {
+					end = len(newCompanies)
+				}
+				batch := newCompanies[i:end]
 
-	// Commit transaction
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
+				err := s.processBatch(ctx, func(ctx context.Context, tx *database.Tx) error {
+					query := `
+						INSERT INTO autotask.companies (
+							id, name, address_line1, address_line2, city, state,
+							postal_code, country, phone, active, sync_at
+						) VALUES (
+							:id, :name, :address_line1, :address_line2, :city, :state,
+							:postal_code, :country, :phone, :active, :sync_at
+						)`
 
-	log.Info().
-		Int("count", len(companies)).
-		Msg("Company sync completed")
+					if _, err := tx.NamedExecContext(ctx, query, batch); err != nil {
+						return fmt.Errorf("failed to insert companies: %w", err)
+					}
 
-	return nil
+					return nil
+				})
+				if err != nil {
+					return fmt.Errorf("failed to process new companies batch %d-%d: %w", i, end, err)
+				}
+
+				log.Debug().
+					Int("start", i).
+					Int("end", end).
+					Int("total", len(newCompanies)).
+					Msg("Processed new companies batch")
+			}
+
+			log.Info().
+				Int("count", len(newCompanies)).
+				Msg("Inserted new companies")
+		}
+
+		// Process updated companies in batches
+		if len(updateCompanies) > 0 {
+			for i := 0; i < len(updateCompanies); i += s.config.Sync.BatchSize {
+				end := i + s.config.Sync.BatchSize
+				if end > len(updateCompanies) {
+					end = len(updateCompanies)
+				}
+				batch := updateCompanies[i:end]
+
+				err := s.processBatch(ctx, func(ctx context.Context, tx *database.Tx) error {
+					query := `
+						UPDATE autotask.companies SET
+							name = :name,
+							address_line1 = :address_line1,
+							address_line2 = :address_line2,
+							city = :city,
+							state = :state,
+							postal_code = :postal_code,
+							country = :country,
+							phone = :phone,
+							active = :active,
+							sync_at = :sync_at,
+							updated_at = NOW()
+						WHERE id = :id`
+
+					if _, err := tx.NamedExecContext(ctx, query, batch); err != nil {
+						return fmt.Errorf("failed to update companies: %w", err)
+					}
+
+					return nil
+				})
+				if err != nil {
+					return fmt.Errorf("failed to process updated companies batch %d-%d: %w", i, end, err)
+				}
+
+				log.Debug().
+					Int("start", i).
+					Int("end", end).
+					Int("total", len(updateCompanies)).
+					Msg("Processed updated companies batch")
+			}
+
+			log.Info().
+				Int("count", len(updateCompanies)).
+				Msg("Updated existing companies")
+		}
+
+		return nil
+	})
 }
 
 // SyncContacts synchronizes contacts from Autotask to the database
@@ -751,6 +767,44 @@ func getStringValue(data map[string]interface{}, key string) string {
 		return fmt.Sprintf("%v", val)
 	}
 	return ""
+}
+
+// getInt64Value safely extracts an int64 value from a map
+func getInt64Value(data map[string]interface{}, key string) int64 {
+	if val, ok := data[key]; ok {
+		switch v := val.(type) {
+		case float64:
+			return int64(v)
+		case int64:
+			return v
+		case int:
+			return int64(v)
+		}
+	}
+	return 0
+}
+
+// getBoolValue safely extracts a bool value from a map
+func getBoolValue(data map[string]interface{}, key string) bool {
+	if val, ok := data[key]; ok {
+		switch v := val.(type) {
+		case bool:
+			return v
+		case string:
+			return v == "true" || v == "1" || v == "yes"
+		case float64:
+			return v != 0
+		case int:
+			return v != 0
+		}
+	}
+	return false
+}
+
+// hasValue checks if a key exists in a map
+func hasValue(data map[string]interface{}, key string) bool {
+	_, ok := data[key]
+	return ok
 }
 
 // parseTime attempts to parse a time value from various formats

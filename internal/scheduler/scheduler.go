@@ -37,7 +37,7 @@ func New(syncService *syncservice.Service, config *config.SyncConfig) *Scheduler
 func (s *Scheduler) Start() error {
 	// Schedule company sync
 	if s.config.Companies > 0 {
-		schedule := fmt.Sprintf("0 0 */%d * * *", s.config.Companies/60) // Convert minutes to hours
+		schedule := fmt.Sprintf("0 */%d * * * *", s.config.Companies) // Every N minutes
 		_, err := s.cron.AddFunc(schedule, func() {
 			if err := s.syncService.SyncCompanies(s.ctx); err != nil {
 				log.Error().Err(err).Msg("Failed to sync companies")
@@ -53,7 +53,7 @@ func (s *Scheduler) Start() error {
 
 	// Schedule contact sync
 	if s.config.Contacts > 0 {
-		schedule := fmt.Sprintf("0 0 */%d * * *", s.config.Contacts/60) // Convert minutes to hours
+		schedule := fmt.Sprintf("0 */%d * * * *", s.config.Contacts) // Every N minutes
 		_, err := s.cron.AddFunc(schedule, func() {
 			if err := s.syncService.SyncContacts(s.ctx); err != nil {
 				log.Error().Err(err).Msg("Failed to sync contacts")

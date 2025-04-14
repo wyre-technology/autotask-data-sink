@@ -35,3 +35,8 @@ config.yaml
 Thumbs.db
 
 project-plan.md
+
+autotask_full_specification_v1.json
+
+plan
+prompt_logs/

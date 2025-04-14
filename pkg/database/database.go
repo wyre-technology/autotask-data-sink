@@ -1,10 +1,13 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/asachs01/autotask-data-sink/pkg/config"
+	"github.com/asachs01/autotask-data-sink/pkg/models"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/rs/zerolog/log"
@@ -13,6 +16,8 @@ import (
 // DB represents a database connection
 type DB struct {
 	*sqlx.DB
+	schema      *SchemaManager
+	performance *PerformanceManager
 }
 
 // New creates a new database connection
@@ -32,7 +37,6 @@ func New(cfg config.DatabaseConfig) (*DB, error) {
 			Msg("PostgreSQL environment variables")
 
 		// Connect to the database using the PostgreSQL driver's built-in support for environment variables
-		// This is the recommended approach as it handles all the connection parameters correctly
 		db, err := sqlx.Open("postgres", "")
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database connection: %w", err)
@@ -46,8 +50,14 @@ func New(cfg config.DatabaseConfig) (*DB, error) {
 		// Set connection pool settings
 		db.SetMaxOpenConns(25)
 		db.SetMaxIdleConns(5)
+		db.SetConnMaxLifetime(time.Hour)
+		db.SetConnMaxIdleTime(time.Minute * 5)
 
-		return &DB{db}, nil
+		dbWrapper := &DB{DB: db}
+		dbWrapper.schema = NewSchemaManager(dbWrapper)
+		dbWrapper.performance = NewPerformanceManager(db.DB)
+
+		return dbWrapper, nil
 	}
 
 	// Fall back to config values
@@ -62,298 +72,43 @@ func New(cfg config.DatabaseConfig) (*DB, error) {
 	}
 
 	// Set connection pool settings
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(cfg.Pool.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.Pool.MaxIdleConns)
+	db.SetConnMaxLifetime(cfg.Pool.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(cfg.Pool.ConnMaxIdleTime)
 
-	return &DB{db}, nil
+	log.Info().
+		Int("max_open_conns", cfg.Pool.MaxOpenConns).
+		Int("max_idle_conns", cfg.Pool.MaxIdleConns).
+		Dur("conn_max_lifetime", cfg.Pool.ConnMaxLifetime).
+		Dur("conn_max_idle_time", cfg.Pool.ConnMaxIdleTime).
+		Msg("Configured database connection pool")
+
+	dbWrapper := &DB{DB: db}
+	dbWrapper.schema = NewSchemaManager(dbWrapper)
+	dbWrapper.performance = NewPerformanceManager(db.DB)
+
+	return dbWrapper, nil
+}
+
+// Schema returns the schema manager
+func (db *DB) Schema() *SchemaManager {
+	return db.schema
+}
+
+// Performance returns the performance manager
+func (db *DB) Performance() *PerformanceManager {
+	return db.performance
 }
 
 // Setup initializes the database schema
-func (db *DB) Setup() error {
-	// Create the schema if it doesn't exist
-	if err := db.createSchema(); err != nil {
-		return err
-	}
-
-	// Create tables for each entity type
-	if err := db.createTables(); err != nil {
-		return err
-	}
-
-	return nil
+func (db *DB) Setup(ctx context.Context) error {
+	return db.schema.Setup(ctx)
 }
 
-// createSchema creates the database schema
-func (db *DB) createSchema() error {
-	_, err := db.Exec(`
-		CREATE SCHEMA IF NOT EXISTS autotask;
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create schema: %w", err)
-	}
-	return nil
-}
-
-// createTables creates all required tables
-func (db *DB) createTables() error {
-	// Create companies table
-	if err := db.createCompaniesTable(); err != nil {
-		return err
-	}
-
-	// Create contacts table
-	if err := db.createContactsTable(); err != nil {
-		return err
-	}
-
-	// Create tickets table
-	if err := db.createTicketsTable(); err != nil {
-		return err
-	}
-
-	// Create time entries table
-	if err := db.createTimeEntriesTable(); err != nil {
-		return err
-	}
-
-	// Create resources table
-	if err := db.createResourcesTable(); err != nil {
-		return err
-	}
-
-	// Create contracts table
-	if err := db.createContractsTable(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// createCompaniesTable creates the companies table
-func (db *DB) createCompaniesTable() error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS autotask.companies (
-			id BIGINT PRIMARY KEY,
-			name TEXT NOT NULL,
-			address_line1 TEXT,
-			address_line2 TEXT,
-			city TEXT,
-			state TEXT,
-			postal_code TEXT,
-			country TEXT,
-			phone TEXT,
-			active BOOLEAN,
-			created_at TIMESTAMP WITH TIME ZONE,
-			updated_at TIMESTAMP WITH TIME ZONE,
-			sync_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE TABLE IF NOT EXISTS autotask.companies_history (
-			history_id SERIAL PRIMARY KEY,
-			company_id BIGINT NOT NULL REFERENCES autotask.companies(id),
-			field_name TEXT NOT NULL,
-			old_value TEXT,
-			new_value TEXT,
-			changed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE INDEX IF NOT EXISTS idx_companies_history_company_id ON autotask.companies_history(company_id);
-		CREATE INDEX IF NOT EXISTS idx_companies_history_changed_at ON autotask.companies_history(changed_at);
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create companies tables: %w", err)
-	}
-	return nil
-}
-
-// createContactsTable creates the contacts table
-func (db *DB) createContactsTable() error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS autotask.contacts (
-			id BIGINT PRIMARY KEY,
-			company_id BIGINT REFERENCES autotask.companies(id),
-			first_name TEXT,
-			last_name TEXT,
-			email TEXT,
-			phone TEXT,
-			mobile TEXT,
-			active BOOLEAN,
-			created_at TIMESTAMP WITH TIME ZONE,
-			updated_at TIMESTAMP WITH TIME ZONE,
-			sync_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE TABLE IF NOT EXISTS autotask.contacts_history (
-			history_id SERIAL PRIMARY KEY,
-			contact_id BIGINT NOT NULL REFERENCES autotask.contacts(id),
-			field_name TEXT NOT NULL,
-			old_value TEXT,
-			new_value TEXT,
-			changed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON autotask.contacts(company_id);
-		CREATE INDEX IF NOT EXISTS idx_contacts_history_contact_id ON autotask.contacts_history(contact_id);
-		CREATE INDEX IF NOT EXISTS idx_contacts_history_changed_at ON autotask.contacts_history(changed_at);
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create contacts tables: %w", err)
-	}
-	return nil
-}
-
-// createTicketsTable creates the tickets table
-func (db *DB) createTicketsTable() error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS autotask.tickets (
-			id BIGINT PRIMARY KEY,
-			title TEXT NOT NULL,
-			description TEXT,
-			status INT,
-			priority INT,
-			queue_id BIGINT,
-			company_id BIGINT REFERENCES autotask.companies(id),
-			contact_id BIGINT REFERENCES autotask.contacts(id),
-			assigned_resource_id BIGINT,
-			created_by_resource_id BIGINT,
-			created_at TIMESTAMP WITH TIME ZONE,
-			updated_at TIMESTAMP WITH TIME ZONE,
-			completed_date TIMESTAMP WITH TIME ZONE,
-			due_date TIMESTAMP WITH TIME ZONE,
-			sync_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE TABLE IF NOT EXISTS autotask.tickets_history (
-			history_id SERIAL PRIMARY KEY,
-			ticket_id BIGINT NOT NULL REFERENCES autotask.tickets(id),
-			field_name TEXT NOT NULL,
-			old_value TEXT,
-			new_value TEXT,
-			changed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE INDEX IF NOT EXISTS idx_tickets_company_id ON autotask.tickets(company_id);
-		CREATE INDEX IF NOT EXISTS idx_tickets_contact_id ON autotask.tickets(contact_id);
-		CREATE INDEX IF NOT EXISTS idx_tickets_assigned_resource_id ON autotask.tickets(assigned_resource_id);
-		CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON autotask.tickets(created_at);
-		CREATE INDEX IF NOT EXISTS idx_tickets_completed_date ON autotask.tickets(completed_date);
-		CREATE INDEX IF NOT EXISTS idx_tickets_status ON autotask.tickets(status);
-		CREATE INDEX IF NOT EXISTS idx_tickets_history_ticket_id ON autotask.tickets_history(ticket_id);
-		CREATE INDEX IF NOT EXISTS idx_tickets_history_changed_at ON autotask.tickets_history(changed_at);
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create tickets tables: %w", err)
-	}
-	return nil
-}
-
-// createTimeEntriesTable creates the time entries table
-func (db *DB) createTimeEntriesTable() error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS autotask.time_entries (
-			id BIGINT PRIMARY KEY,
-			ticket_id BIGINT REFERENCES autotask.tickets(id),
-			resource_id BIGINT,
-			date_worked DATE,
-			start_time TIMESTAMP WITH TIME ZONE,
-			end_time TIMESTAMP WITH TIME ZONE,
-			hours_worked DECIMAL(10,2),
-			summary TEXT,
-			internal_notes TEXT,
-			non_billable BOOLEAN,
-			created_at TIMESTAMP WITH TIME ZONE,
-			updated_at TIMESTAMP WITH TIME ZONE,
-			sync_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE TABLE IF NOT EXISTS autotask.time_entries_history (
-			history_id SERIAL PRIMARY KEY,
-			time_entry_id BIGINT NOT NULL REFERENCES autotask.time_entries(id),
-			field_name TEXT NOT NULL,
-			old_value TEXT,
-			new_value TEXT,
-			changed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE INDEX IF NOT EXISTS idx_time_entries_ticket_id ON autotask.time_entries(ticket_id);
-		CREATE INDEX IF NOT EXISTS idx_time_entries_resource_id ON autotask.time_entries(resource_id);
-		CREATE INDEX IF NOT EXISTS idx_time_entries_date_worked ON autotask.time_entries(date_worked);
-		CREATE INDEX IF NOT EXISTS idx_time_entries_history_time_entry_id ON autotask.time_entries_history(time_entry_id);
-		CREATE INDEX IF NOT EXISTS idx_time_entries_history_changed_at ON autotask.time_entries_history(changed_at);
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create time entries tables: %w", err)
-	}
-	return nil
-}
-
-// createResourcesTable creates the resources table
-func (db *DB) createResourcesTable() error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS autotask.resources (
-			id BIGINT PRIMARY KEY,
-			first_name TEXT,
-			last_name TEXT,
-			email TEXT,
-			active BOOLEAN,
-			resource_type INT,
-			created_at TIMESTAMP WITH TIME ZONE,
-			updated_at TIMESTAMP WITH TIME ZONE,
-			sync_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE TABLE IF NOT EXISTS autotask.resources_history (
-			history_id SERIAL PRIMARY KEY,
-			resource_id BIGINT NOT NULL REFERENCES autotask.resources(id),
-			field_name TEXT NOT NULL,
-			old_value TEXT,
-			new_value TEXT,
-			changed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE INDEX IF NOT EXISTS idx_resources_history_resource_id ON autotask.resources_history(resource_id);
-		CREATE INDEX IF NOT EXISTS idx_resources_history_changed_at ON autotask.resources_history(changed_at);
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create resources tables: %w", err)
-	}
-	return nil
-}
-
-// createContractsTable creates the contracts table
-func (db *DB) createContractsTable() error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS autotask.contracts (
-			id BIGINT PRIMARY KEY,
-			company_id BIGINT REFERENCES autotask.companies(id),
-			name TEXT NOT NULL,
-			contract_type INT,
-			status INT,
-			start_date DATE,
-			end_date DATE,
-			time_remaining DECIMAL(10,2),
-			created_at TIMESTAMP WITH TIME ZONE,
-			updated_at TIMESTAMP WITH TIME ZONE,
-			sync_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE TABLE IF NOT EXISTS autotask.contracts_history (
-			history_id SERIAL PRIMARY KEY,
-			contract_id BIGINT NOT NULL REFERENCES autotask.contracts(id),
-			field_name TEXT NOT NULL,
-			old_value TEXT,
-			new_value TEXT,
-			changed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		);
-
-		CREATE INDEX IF NOT EXISTS idx_contracts_company_id ON autotask.contracts(company_id);
-		CREATE INDEX IF NOT EXISTS idx_contracts_history_contract_id ON autotask.contracts_history(contract_id);
-		CREATE INDEX IF NOT EXISTS idx_contracts_history_changed_at ON autotask.contracts_history(changed_at);
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create contracts tables: %w", err)
-	}
-	return nil
+// ValidateSchema validates the database schema
+func (db *DB) ValidateSchema(ctx context.Context) error {
+	return db.schema.ValidateSchema(ctx)
 }
 
 // CreateViews creates database views for common queries
@@ -457,5 +212,54 @@ func (db *DB) createContractProfitabilityView() error {
 	if err != nil {
 		return fmt.Errorf("failed to create contract profitability view: %w", err)
 	}
+	return nil
+}
+
+// BatchProcessor is a function that processes a batch of records within a transaction
+type BatchProcessor func(context.Context, *Tx) error
+
+// ProcessBatch processes records in batches within transactions
+func (db *DB) ProcessBatch(ctx context.Context, batchSize int, processor BatchProcessor) error {
+	// Process batch in a transaction
+	err := db.WithTransaction(ctx, func(tx *Tx) error {
+		return processor(ctx, tx)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to process batch: %w", err)
+	}
+
+	return nil
+}
+
+// CompanyBatchProcessor is a function that processes a batch of companies within a transaction
+type CompanyBatchProcessor func(context.Context, *Tx, []models.Company) error
+
+// ProcessCompanyBatch processes a batch of companies within a transaction
+func (db *DB) ProcessCompanyBatch(ctx context.Context, records []models.Company, batchSize int, processor CompanyBatchProcessor) error {
+	length := len(records)
+	for i := 0; i < length; i += batchSize {
+		end := i + batchSize
+		if end > length {
+			end = length
+		}
+
+		// Get the batch
+		batch := records[i:end]
+
+		// Process batch in a transaction
+		err := db.WithTransaction(ctx, func(tx *Tx) error {
+			return processor(ctx, tx, batch)
+		})
+		if err != nil {
+			return fmt.Errorf("failed to process batch %d-%d: %w", i, end, err)
+		}
+
+		log.Debug().
+			Int("start", i).
+			Int("end", end).
+			Int("total", length).
+			Msg("Processed batch successfully")
+	}
+
 	return nil
 }
